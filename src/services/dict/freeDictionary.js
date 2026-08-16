@@ -37,13 +37,28 @@ export function posLabel(pos) {
   return POS_MAP[String(pos).toLowerCase()] || pos
 }
 
-/** 从 audio 链接里判断口音：.../hello-uk.mp3 */
-function accentOf(url = '') {
+/** 从 audio 链接里判断口音。
+ *  Free Dictionary 的音频命名很乱，常见形态：
+ *    .../hello-uk.mp3   .../en_US/hello_us_1.mp3   .../hello_gb_1.mp3
+ *    .../hello-us.mp3   .../en_GB/hello.mp3        .../hello.mp3（无口音标记）
+ *  旧逻辑只认 `-uk.`/`-us.` 这种连字符后缀，导致绝大多数没有后缀的通用音频
+ *  （us_1.mp3 / gb_1.mp3 / 纯 hello.mp3）被丢弃，页面有音标却没真人音频，
+ *  点发音退化成 TTS 读字母，听着「不对」。
+ *  这里放宽匹配，并额外返回 isGeneric 标记（无口音后缀的音频两端可共用）。
+ */
+function accentInfo(url = '') {
   const u = url.toLowerCase()
-  if (u.includes('-uk.') || u.includes('-gb.')) return 'uk'
-  if (u.includes('-us.')) return 'us'
-  if (u.includes('-au.')) return 'au'
-  return ''
+  if (u.includes('-uk.') || u.includes('_uk.') || u.includes('-gb.') || u.includes('_gb.') || u.includes('/en_gb/') || u.includes('/british/')) {
+    return { accent: 'uk', generic: false }
+  }
+  if (u.includes('-us.') || u.includes('_us.') || u.includes('/en_us/') || u.includes('/american/')) {
+    return { accent: 'us', generic: false }
+  }
+  if (u.includes('-au.') || u.includes('_au.')) {
+    return { accent: 'au', generic: false }
+  }
+  // 没有口音后缀的通用音频（如 hello.mp3 / hello_1.mp3）—— 两端兜底共用
+  return { accent: '', generic: true }
 }
 
 function normalizePhonetic(text = '') {
@@ -133,6 +148,7 @@ export async function lookup(word, { signal } = {}) {
   /* ---------- 合并多个 entry（同一个词的不同词源会拆成多条） ---------- */
   const phonetics = { uk: '', us: '' }
   const audio = { uk: '', us: '' }
+  const genericAudio = [] // 无口音后缀的通用音频，最后两端兜底共用
   let genericPhonetic = ''
   const posBucket = new Map()
   const examples = []
@@ -141,11 +157,17 @@ export async function lookup(word, { signal } = {}) {
     if (entry.phonetic && !genericPhonetic) genericPhonetic = normalizePhonetic(entry.phonetic)
 
     for (const p of entry.phonetics || []) {
-      const acc = accentOf(p.audio || '')
+      const info = accentInfo(p.audio || '')
       const text = normalizePhonetic(p.text || '')
-      if (acc === 'uk' || acc === 'us') {
-        if (text && !phonetics[acc]) phonetics[acc] = text
-        if (p.audio && !audio[acc]) audio[acc] = p.audio
+      if (info.accent === 'uk' || info.accent === 'us') {
+        if (text && !phonetics[info.accent]) phonetics[info.accent] = text
+        if (p.audio && !audio[info.accent]) audio[info.accent] = p.audio
+      } else if (info.generic) {
+        // 没有口音标记的音频：音标照常用，音频先收着，最后两端兜底
+        if (text && !genericPhonetic) genericPhonetic = text
+        if (p.audio && genericAudio.length < 4 && !genericAudio.includes(p.audio)) {
+          genericAudio.push(p.audio)
+        }
       } else if (text && !genericPhonetic) {
         genericPhonetic = text
       }
@@ -173,6 +195,16 @@ export async function lookup(word, { signal } = {}) {
   } else {
     if (!phonetics.uk) phonetics.uk = phonetics.us || genericPhonetic
     if (!phonetics.us) phonetics.us = phonetics.uk || genericPhonetic
+  }
+
+  /* 真人音频兜底：Free Dictionary 大量音频没有口音后缀（us_1.mp3 / hello.mp3），
+   * 上面没填进 uk/us，这里用通用音频补齐任一口音的空缺，保证点发音能播真人音。 */
+  if (!audio.uk && !audio.us) {
+    audio.uk = genericAudio[0] || ''
+    audio.us = genericAudio[0] || ''
+  } else {
+    if (!audio.uk) audio.uk = audio.us || genericAudio[0] || ''
+    if (!audio.us) audio.us = audio.uk || genericAudio[0] || ''
   }
 
   const meanings = [...posBucket.values()].filter((m) => m.en.length > 0)

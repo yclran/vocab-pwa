@@ -29,8 +29,12 @@ const selectedCount = computed(() => selected.value.size)
 const batchDeleting = ref(false)
 const groupDeleting = ref(false)
 
-/* 当前列表里「还没有拿到释义」的词数量（添加时没联网补全的那些） */
-const pendingCount = computed(() => words.value.filter((w) => !hasChinese(w)).length)
+/* 当前列表里「还没拿到中文释义」或「没有真人发音」的词数量
+ * （这些词要么添加时没联网，要么旧版本解析音频有 bug，需要重新查一遍） */
+const pendingCount = computed(
+  () => words.value.filter((w) => !hasChinese(w) || !(w.audio?.uk || w.audio?.us)).length
+)
+const hasPending = computed(() => pendingCount.value > 0)
 
 /* 分组管理面板 */
 const showGroupPanel = ref(false)
@@ -134,15 +138,19 @@ async function batchEnrich() {
   await load()
 }
 
-/* 一键把「添加时没联网拿到释义」的词重新拉取一遍 */
+/* 一键把「缺失中文释义或缺失真人发音」的词重新联网拉取一遍（强制重查，
+ * 这样旧版本解析出错的音频也能被修正） */
 async function refetchMissing() {
-  const keys = words.value.filter((w) => !hasChinese(w)).map((w) => w.key)
+  const keys = words.value
+    .filter((w) => !hasChinese(w) || !(w.audio?.uk || w.audio?.us))
+    .map((w) => w.key)
   if (!keys.length) {
-    ui.ok('没有需要补全释义的词')
+    ui.ok('没有需要补全释义或发音的词')
     return
   }
-  await vocab.enrich(keys, { force: false })
+  await vocab.enrich(keys, { force: true })
   await load()
+  ui.ok(`已重新联网补全 ${keys.length} 个词的释义与发音`)
 }
 
 function download(name, text) {
@@ -274,7 +282,7 @@ async function removeGroup(g) {
 
       <!-- 一键补全：把添加时没联网拿到释义的词重新拉取一遍 -->
       <button
-        v-if="pendingCount"
+        v-if="hasPending"
         class="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition active:bg-brand-700 disabled:opacity-70"
         :disabled="vocab.enriching"
         @click="refetchMissing"
@@ -294,7 +302,7 @@ async function removeGroup(g) {
             d="M5.5 9a8 8 0 0113.5-2.5M18.5 15A8 8 0 014.5 17.5"
           />
         </svg>
-        <span v-if="!vocab.enriching">联网补全 {{ pendingCount }} 个缺失释义的词</span>
+        <span v-if="!vocab.enriching">联网补全 {{ pendingCount }} 个词的释义与发音</span>
         <span v-else>补全中… {{ vocab.enriching.done }}/{{ vocab.enriching.total }}</span>
       </button>
     </div>
